@@ -185,7 +185,9 @@ func TestFeedbackSendsTheVerdictAndParsesTheResult(t *testing.T) {
 			"verdict":"rejected","source":"human","verdicts_for_decision":2,"previous_verdict":"accepted"}`))
 	})
 
-	result, err := client.Feedback(context.Background(), "abc123", "rejected", "human", "не тот момент")
+	result, err := client.Feedback(context.Background(), FeedbackRequest{
+		DecisionID: "abc123", Verdict: "rejected", Source: "human", Comment: "не тот момент",
+	})
 	if err != nil {
 		t.Fatalf("Feedback returned error: %v", err)
 	}
@@ -195,6 +197,9 @@ func TestFeedbackSendsTheVerdictAndParsesTheResult(t *testing.T) {
 	}
 	if received["source"] != "human" {
 		t.Errorf("source = %v, want human preserved (it outranks an agent verdict)", received["source"])
+	}
+	if _, present := received["query"]; present {
+		t.Error("an absent question was sent as a field; it should be omitted so the field means what it says")
 	}
 	if !result.KnownDecision {
 		t.Error("known_decision = false, want true")
@@ -207,6 +212,32 @@ func TestFeedbackSendsTheVerdictAndParsesTheResult(t *testing.T) {
 	}
 }
 
+// The router stores only a hash of the query, so the caller attaching it is the only way a
+// label becomes re-judgeable by someone else.
+func TestFeedbackForwardsTheQuestionWhenTheCallerHasIt(t *testing.T) {
+	var received map[string]interface{}
+	client, _ := stubJev(t, func(w http.ResponseWriter, r *http.Request) {
+		decoded := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&decoded); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		received = decoded
+		_, _ = w.Write([]byte(`{"recorded":true,"decision_id":"abc123","known_decision":true,
+			"verdict":"accepted","source":"agent","verdicts_for_decision":1,"previous_verdict":null}`))
+	})
+
+	if _, err := client.Feedback(context.Background(), FeedbackRequest{
+		DecisionID: "abc123", Verdict: "accepted", Source: "agent",
+		Query: "какой момент затяжки болтов головки блока цилиндров",
+	}); err != nil {
+		t.Fatalf("Feedback returned error: %v", err)
+	}
+
+	if received["query"] != "какой момент затяжки болтов головки блока цилиндров" {
+		t.Errorf("query = %v, want the question forwarded intact", received["query"])
+	}
+}
+
 // A verdict with no id would be recorded against nothing and quietly inflate the label
 // count, so it is refused before it reaches the network.
 func TestFeedbackRefusesAnEmptyDecisionID(t *testing.T) {
@@ -214,7 +245,9 @@ func TestFeedbackRefusesAnEmptyDecisionID(t *testing.T) {
 		t.Error("the client called the router for a verdict that cannot be attached to anything")
 	})
 
-	if _, err := client.Feedback(context.Background(), "   ", "accepted", "agent", ""); err == nil {
+	if _, err := client.Feedback(context.Background(), FeedbackRequest{
+		DecisionID: "   ", Verdict: "accepted", Source: "agent",
+	}); err == nil {
 		t.Fatal("Feedback accepted an empty decision_id")
 	}
 }

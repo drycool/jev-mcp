@@ -158,6 +158,7 @@ func (s *Server) callTool(params CallToolParams) CallToolResult {
 			Verdict    string `json:"verdict"`
 			Comment    string `json:"comment"`
 			Source     string `json:"source"`
+			Query      string `json:"query"`
 		}
 		if err := unmarshalArgs(params.Arguments, &args); err != nil {
 			return errorResult("invalid arguments for jev_feedback: " + err.Error())
@@ -181,7 +182,13 @@ func (s *Server) callTool(params CallToolParams) CallToolResult {
 
 		ctx, cancel := context.WithTimeout(context.Background(), s.defaultTimeout)
 		defer cancel()
-		result, err := s.client.Feedback(ctx, args.DecisionID, args.Verdict, source, args.Comment)
+		result, err := s.client.Feedback(ctx, FeedbackRequest{
+			DecisionID: args.DecisionID,
+			Verdict:    args.Verdict,
+			Source:     source,
+			Comment:    args.Comment,
+			Query:      args.Query,
+		})
 		if err != nil {
 			return errorResult(err.Error())
 		}

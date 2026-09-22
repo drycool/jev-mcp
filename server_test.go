@@ -509,6 +509,24 @@ func TestToolsCallFeedbackWarnsWhenTheVerdictLabelsNothing(t *testing.T) {
 	}
 }
 
+func TestToolsCallFeedbackForwardsTheQuestion(t *testing.T) {
+	var sent map[string]interface{}
+	server := feedbackServer(t, stubFeedbackResponse, &sent)
+
+	resp, _ := server.handle(frame("28", "tools/call",
+		`{"name":"jev_feedback","arguments":{"decision_id":"`+stubDecisionID+
+			`","verdict":"partial","query":"порядок регулировки зазоров клапанов"}}`))
+	if result := resp.Result.(CallToolResult); result.IsError {
+		t.Fatalf("feedback reported an error: %s", firstText(t, result))
+	}
+
+	// The router keeps only a hash of the query, so this is the only route by which a label
+	// becomes re-judgeable by someone who was not there.
+	if sent["query"] != "порядок регулировки зазоров клапанов" {
+		t.Errorf("query = %v, want the question forwarded intact", sent["query"])
+	}
+}
+
 func TestToolsCallFeedbackReportsACorrection(t *testing.T) {
 	body := strings.Replace(stubFeedbackResponse, `"verdicts_for_decision":1`, `"verdicts_for_decision":2`, 1)
 	body = strings.Replace(body, `"previous_verdict":null`, `"previous_verdict":"accepted"`, 1)

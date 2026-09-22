@@ -65,13 +65,18 @@ jev_query  ->  answer + decision_id
                     |
              you use the answer and find out whether it worked
                     |
-jev_feedback(decision_id, accepted | partial | rejected)
+jev_feedback(decision_id, accepted | partial | rejected, query, comment)
 ```
 
 `accepted` means usable as given, `partial` means it needed correction or more work,
 `rejected` means wrong. There is deliberately no `unknown`: an abstention carries no signal
 and would only inflate the label count. `source` is `agent` (the default), `human` or
 `script`, and a human verdict outranks an agent's when the dataset is read.
+
+**Pass `query` with the question you asked.** The router stores only a hash of it, so a
+verdict without its question can never be re-checked by anyone else — the reader can see what
+was answered but not what was asked. You have the question at the moment you judge; this is
+the only point at which it can be captured without turning on raw-query logging.
 
 Report the **wrong** answers especially. A log of accepted answers cannot calibrate a
 threshold or train anything — the failures are the only part with information in it.

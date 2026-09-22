@@ -120,6 +120,7 @@ def main() -> int:
                          "arguments": {"decision_id": decision_id,
                                        "verdict": "partial",
                                        "source": "agent",
+                                       "query": "порядок регулировки зазоров клапанов",
                                        "comment": "зазоры указаны, но не сказано, что двигатель должен быть холодным"}}})
         verdict = read()["result"]
         verdict_lines = verdict["content"][0]["text"].splitlines()

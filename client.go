@@ -101,26 +101,47 @@ func (c *JevClient) Query(ctx context.Context, query string, execute bool) (*Que
 	return &result, nil
 }
 
+// FeedbackRequest is a verdict to record. A struct rather than a parameter list because the
+// call keeps growing and positionally-adjacent string arguments are how a comment ends up in
+// the query field.
+type FeedbackRequest struct {
+	DecisionID string
+	Verdict    string
+	Source     string
+	Comment    string
+	// Optional. The decision log keeps only a hash of the query, so a reader can see what was
+	// answered but not what was asked - and nobody can judge an answer without the question.
+	// The caller has it when it judges, so attaching it here makes the label self-contained
+	// without turning on raw-query logging globally.
+	Query string
+}
+
 // Feedback records a verdict on a decision the router made. This is the only ground truth
 // the system can have: the router cannot judge its own answer, so a label can only come
 // from a consumer. Reporting a verdict is what turns a log line into a training example.
-func (c *JevClient) Feedback(ctx context.Context, decisionID, verdict, source, comment string) (*FeedbackResult, error) {
-	if strings.TrimSpace(decisionID) == "" {
+func (c *JevClient) Feedback(ctx context.Context, request FeedbackRequest) (*FeedbackResult, error) {
+	if strings.TrimSpace(request.DecisionID) == "" {
 		return nil, fmt.Errorf("feedback needs the decision_id of the answer being judged")
 	}
 
-	payload, err := json.Marshal(map[string]interface{}{
-		"decision_id": decisionID,
-		"verdict":     verdict,
-		"source":      source,
-		"comment":     comment,
-	})
+	payload := map[string]interface{}{
+		"decision_id": request.DecisionID,
+		"verdict":     request.Verdict,
+		"source":      request.Source,
+		"comment":     request.Comment,
+	}
+	// Sent only when supplied: an empty string would create a field that looks populated.
+	if strings.TrimSpace(request.Query) != "" {
+		payload["query"] = request.Query
+	}
+
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("encode feedback: %w", err)
 	}
 
 	var result FeedbackResult
-	if err := c.post(ctx, "/feedback", payload, &result); err != nil {
+	if err := c.post(ctx, "/feedback", body, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil

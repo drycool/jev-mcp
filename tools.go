@@ -69,8 +69,10 @@ func toolDefinitions() []Tool {
 				"its own answers, so a label exists only if the consumer reports one. It is also the one call " +
 				"worth making when the answer was WRONG - a log of accepted answers cannot calibrate or train " +
 				"anything. accepted = usable as given; partial = needed correction or further work; rejected = " +
-				"wrong. Verdicts are append-only, so reporting a correction later is expected and safe; the " +
-				"latest verdict from the strongest source wins when the dataset is read.",
+				"wrong. Pass query with the question you asked: the router stores only a hash of it, and a " +
+				"verdict without its question cannot be re-checked by anyone else. Verdicts are append-only, so " +
+				"reporting a correction later is expected and safe; the latest verdict from the strongest source " +
+				"wins when the dataset is read.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -86,6 +88,10 @@ func toolDefinitions() []Tool {
 					"comment": map[string]interface{}{
 						"type":        "string",
 						"description": "What was wrong or missing. Short and specific: it becomes part of the dataset.",
+					},
+					"query": map[string]interface{}{
+						"type": "string",
+						"description": "The question this answer replied to. The router logs only a hash of the query, so a verdict without its question cannot be re-judged by anyone else later. Include it when you have it.",
 					},
 					"source": map[string]interface{}{
 						"type":        "string",
