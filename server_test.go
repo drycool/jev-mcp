@@ -76,7 +76,12 @@ func TestToolsListExposesRouterToolsWithSchemas(t *testing.T) {
 	result := resp.Result.(map[string]interface{})
 	tools := result["tools"].([]Tool)
 
-	wanted := map[string]bool{"jev_query": false, "jev_health": false, "jev_stats": false}
+	wanted := map[string]bool{
+		"jev_query":    false,
+		"jev_health":   false,
+		"jev_stats":    false,
+		"jev_feedback": false,
+	}
 	for _, tool := range tools {
 		if _, ok := wanted[tool.Name]; ok {
 			wanted[tool.Name] = true
@@ -371,6 +376,167 @@ func TestCompactAndScalarHelpers(t *testing.T) {
 	}
 	if got := compactJSON(map[string]interface{}{"a": 1}); got != `{"a":1}` {
 		t.Errorf("compactJSON = %q, want compact JSON", got)
+	}
+}
+
+const stubDecisionID = "9f2c41b7aa5e4d1e8c3f0b6a2d7e5f18"
+
+const stubFeedbackResponse = `{"recorded":true,"decision_id":"9f2c41b7aa5e4d1e8c3f0b6a2d7e5f18",
+	"known_decision":true,"verdict":"rejected","source":"agent","verdicts_for_decision":1,
+	"previous_verdict":null}`
+
+// feedbackServer answers /feedback with body and records what was sent to it.
+func feedbackServer(t *testing.T, body string, sent *map[string]interface{}) *Server {
+	t.Helper()
+	return newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/feedback") {
+			if sent != nil {
+				decoded := map[string]interface{}{}
+				if err := json.NewDecoder(r.Body).Decode(&decoded); err != nil {
+					t.Errorf("decode feedback body: %v", err)
+				}
+				*sent = decoded
+			}
+			_, _ = w.Write([]byte(body))
+			return
+		}
+		_, _ = w.Write([]byte(stubQueryResponse))
+	})
+}
+
+func TestQueryProvenanceCarriesTheDecisionID(t *testing.T) {
+	server := answerQuery(t)
+
+	resp, _ := server.handle(frame("20", "tools/call",
+		`{"name":"jev_query","arguments":{"query":"момент затяжки"}}`))
+	text := firstText(t, resp.Result.(CallToolResult))
+
+	// A verdict is worth nothing without the id, and the caller has no other way to learn it.
+	if !strings.Contains(text, stubDecisionID) {
+		t.Errorf("provenance omitted the decision_id, so the answer cannot be labelled:\n%s", text)
+	}
+	if !strings.Contains(text, "jev_feedback") {
+		t.Errorf("provenance does not point at the feedback tool:\n%s", text)
+	}
+}
+
+func TestToolsCallFeedbackSendsTheVerdictAndDefaultsTheSource(t *testing.T) {
+	var sent map[string]interface{}
+	server := feedbackServer(t, stubFeedbackResponse, &sent)
+
+	resp, _ := server.handle(frame("21", "tools/call",
+		`{"name":"jev_feedback","arguments":{"decision_id":"`+stubDecisionID+
+			`","verdict":"rejected","comment":"не тот момент затяжки"}}`))
+	result := resp.Result.(CallToolResult)
+	if result.IsError {
+		t.Fatalf("feedback reported an error: %s", firstText(t, result))
+	}
+
+	if sent["decision_id"] != stubDecisionID {
+		t.Errorf("decision_id = %v, want it forwarded", sent["decision_id"])
+	}
+	if sent["verdict"] != "rejected" {
+		t.Errorf("verdict = %v, want rejected", sent["verdict"])
+	}
+	// The agent is the default judge; a human verdict is reported explicitly.
+	if sent["source"] != "agent" {
+		t.Errorf("source = %v, want agent when the caller does not say", sent["source"])
+	}
+	if sent["comment"] != "не тот момент затяжки" {
+		t.Errorf("comment = %v, want it forwarded for the dataset", sent["comment"])
+	}
+
+	text := firstText(t, result)
+	if !strings.Contains(text, "verdict recorded: rejected") {
+		t.Errorf("output does not confirm the verdict:\n%s", text)
+	}
+	if !strings.Contains(text, "first verdict for that decision") {
+		t.Errorf("output does not say whether this is a first label or a correction:\n%s", text)
+	}
+}
+
+func TestToolsCallFeedbackRefusesAnAbstention(t *testing.T) {
+	server := feedbackServer(t, stubFeedbackResponse, nil)
+
+	resp, _ := server.handle(frame("22", "tools/call",
+		`{"name":"jev_feedback","arguments":{"decision_id":"`+stubDecisionID+`","verdict":"unknown"}}`))
+	result := resp.Result.(CallToolResult)
+
+	if !result.IsError {
+		t.Fatal("an abstention was accepted as a label")
+	}
+	if !strings.Contains(firstText(t, result), "unknown") {
+		t.Errorf("the rejection does not explain that there is no \"unknown\": %s", firstText(t, result))
+	}
+}
+
+func TestToolsCallFeedbackRequiresADecisionID(t *testing.T) {
+	server := feedbackServer(t, stubFeedbackResponse, nil)
+
+	resp, _ := server.handle(frame("23", "tools/call",
+		`{"name":"jev_feedback","arguments":{"verdict":"accepted"}}`))
+	result := resp.Result.(CallToolResult)
+
+	if !result.IsError || !strings.Contains(firstText(t, result), "decision_id") {
+		t.Errorf("a verdict with nothing to attach to was accepted: %+v", result)
+	}
+}
+
+func TestToolsCallFeedbackRejectsAnInventedSource(t *testing.T) {
+	server := feedbackServer(t, stubFeedbackResponse, nil)
+
+	resp, _ := server.handle(frame("24", "tools/call",
+		`{"name":"jev_feedback","arguments":{"decision_id":"`+stubDecisionID+`","verdict":"accepted","source":"vibes"}}`))
+	result := resp.Result.(CallToolResult)
+
+	if !result.IsError || !strings.Contains(firstText(t, result), "agent, human, script") {
+		t.Errorf("an unknown judge was accepted: %+v", result)
+	}
+}
+
+func TestToolsCallFeedbackWarnsWhenTheVerdictLabelsNothing(t *testing.T) {
+	body := strings.Replace(stubFeedbackResponse, `"known_decision":true`, `"known_decision":false`, 1)
+	server := feedbackServer(t, body, nil)
+
+	resp, _ := server.handle(frame("25", "tools/call",
+		`{"name":"jev_feedback","arguments":{"decision_id":"ffffffffffffffffffffffffffffffff","verdict":"accepted"}}`))
+	text := firstText(t, resp.Result.(CallToolResult))
+
+	// Recorded, but the caller must know it attaches to nothing - a verdict that labels
+	// nothing is the failure mode that would quietly invalidate the dataset.
+	if !strings.Contains(text, "WARNING") || !strings.Contains(text, "does not contain this id") {
+		t.Errorf("an orphaned verdict was reported as a clean success:\n%s", text)
+	}
+}
+
+func TestToolsCallFeedbackReportsACorrection(t *testing.T) {
+	body := strings.Replace(stubFeedbackResponse, `"verdicts_for_decision":1`, `"verdicts_for_decision":2`, 1)
+	body = strings.Replace(body, `"previous_verdict":null`, `"previous_verdict":"accepted"`, 1)
+	server := feedbackServer(t, body, nil)
+
+	resp, _ := server.handle(frame("26", "tools/call",
+		`{"name":"jev_feedback","arguments":{"decision_id":"`+stubDecisionID+`","verdict":"rejected","source":"human"}}`))
+	text := firstText(t, resp.Result.(CallToolResult))
+
+	if !strings.Contains(text, "verdict #2") || !strings.Contains(text, `replaces "accepted"`) {
+		t.Errorf("a correction is not distinguished from a first label:\n%s", text)
+	}
+}
+
+func TestToolsCallFeedbackSurfacesRouterFailure(t *testing.T) {
+	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "feedback store unavailable", http.StatusServiceUnavailable)
+	})
+
+	resp, _ := server.handle(frame("27", "tools/call",
+		`{"name":"jev_feedback","arguments":{"decision_id":"`+stubDecisionID+`","verdict":"accepted"}}`))
+	result := resp.Result.(CallToolResult)
+
+	if !result.IsError || !strings.Contains(firstText(t, result), "503") {
+		t.Errorf("a failed verdict write was not surfaced: %+v", result)
+	}
+	if resp.Error != nil {
+		t.Errorf("a verdict failure became a protocol error: %+v", resp.Error)
 	}
 }
 

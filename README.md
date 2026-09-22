@@ -38,9 +38,10 @@ Go 1.22+, stdlib only. Nothing to install.
 
 | tool | what it does |
 |---|---|
-| `jev_query` | Routes a question; returns the answer **plus provenance** — strategy, target agent, measured latency, degradation state. `execute=false` (default) returns routing and local context in milliseconds; `execute=true` also synthesises an answer through the agent tier and costs seconds. |
-| `jev_health` | Which tiers are up and which configuration is in force (`lightrag_enabled`, `vector_timeout_s`, LLM host, shadow mode). Call this first when a call fails, hangs, or comes back empty, so a *disabled* tier is not mistaken for a broken one. |
+| `jev_query` | Routes a question; returns the answer **plus provenance** — strategy, target agent, measured latency, degradation state, and the `decision_id` that makes the answer labellable. `execute=false` (default) returns routing and local context in milliseconds; `execute=true` also synthesises an answer through the agent tier and costs seconds. |
+| `jev_health` | Which tiers are up and which configuration is in force (`lightrag_enabled`, `vector_timeout_s`, LLM host, shadow mode, labelling settings). Call this first when a call fails, hangs, or comes back empty, so a *disabled* tier is not mistaken for a broken one. |
 | `jev_stats` | Counters since start, every one of them including the zeros. An all-zero counter set is the evidence that nothing is calling the router. |
+| `jev_feedback` | Records whether a `jev_query` answer was actually usable, against the `decision_id` that came with it. This is the only ground truth the system can have, and the one call worth making when the answer was **wrong**. |
 
 Every `jev_query` result ends with a provenance block, so the caller can tell a 9 ms
 exact hit from a 10 s synthesis without guessing:
@@ -51,7 +52,38 @@ exact hit from a 10 s synthesis without guessing:
 strategy: exact_fts (0.95) · target: general_agent · elapsed: 10107 ms · degraded: false
 intent: exact_search · domain: general · keywords: момент, затяжки, болтов, головки
 lightrag: mode=skip required=false
+decision_id: 6bbbf8b31b4b4a2a8072665b377c0408 (report a verdict with jev_feedback)
 ```
+
+## The labelling loop
+
+An answer is not a training example until someone says whether it was right, and the router
+cannot be that someone. So the loop closes through the caller:
+
+```
+jev_query  ->  answer + decision_id
+                    |
+             you use the answer and find out whether it worked
+                    |
+jev_feedback(decision_id, accepted | partial | rejected)
+```
+
+`accepted` means usable as given, `partial` means it needed correction or more work,
+`rejected` means wrong. There is deliberately no `unknown`: an abstention carries no signal
+and would only inflate the label count. `source` is `agent` (the default), `human` or
+`script`, and a human verdict outranks an agent's when the dataset is read.
+
+Report the **wrong** answers especially. A log of accepted answers cannot calibrate a
+threshold or train anything — the failures are the only part with information in it.
+
+Verdicts are append-only, so reporting a correction later is both expected and safe; the
+tool tells you when a verdict replaces an earlier one, and warns when the `decision_id`
+labels nothing (`known_decision: false`), which is the failure mode that would quietly
+invalidate a dataset.
+
+See the router's README for the storage layout and for
+`scripts/label_coverage.py`, which reports coverage and whether there is enough ground truth
+to act on yet.
 
 ## Registering with clients
 

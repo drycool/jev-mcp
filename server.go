@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -151,8 +152,61 @@ func (s *Server) callTool(params CallToolParams) CallToolResult {
 		}
 		return textResult(formatStats(stats))
 
+	case "jev_feedback":
+		var args struct {
+			DecisionID string `json:"decision_id"`
+			Verdict    string `json:"verdict"`
+			Comment    string `json:"comment"`
+			Source     string `json:"source"`
+		}
+		if err := unmarshalArgs(params.Arguments, &args); err != nil {
+			return errorResult("invalid arguments for jev_feedback: " + err.Error())
+		}
+		if strings.TrimSpace(args.DecisionID) == "" {
+			return errorResult("jev_feedback requires the decision_id that came back with the jev_query answer")
+		}
+		// Checked here as well as in the router so the caller gets a usable sentence
+		// instead of a serialisation error, and so an abstention cannot slip through.
+		if !isVerdict(args.Verdict) {
+			return errorResult("jev_feedback verdict must be one of accepted, rejected, partial (got " +
+				strconv.Quote(args.Verdict) + "); there is no \"unknown\" - an abstention carries no signal")
+		}
+		source := strings.TrimSpace(args.Source)
+		if source == "" {
+			source = "agent"
+		}
+		if !isFeedbackSource(source) {
+			return errorResult("jev_feedback source must be one of agent, human, script (got " + strconv.Quote(source) + ")")
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), s.defaultTimeout)
+		defer cancel()
+		result, err := s.client.Feedback(ctx, args.DecisionID, args.Verdict, source, args.Comment)
+		if err != nil {
+			return errorResult(err.Error())
+		}
+		return textResult(formatFeedback(result, args.Comment))
+
 	default:
 		return errorResult("unknown tool: " + params.Name)
+	}
+}
+
+func isVerdict(value string) bool {
+	switch value {
+	case "accepted", "rejected", "partial":
+		return true
+	default:
+		return false
+	}
+}
+
+func isFeedbackSource(value string) bool {
+	switch value {
+	case "agent", "human", "script":
+		return true
+	default:
+		return false
 	}
 }
 

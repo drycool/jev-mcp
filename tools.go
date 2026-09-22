@@ -62,6 +62,41 @@ func toolDefinitions() []Tool {
 				"properties": map[string]interface{}{},
 			},
 		},
+		{
+			Name: "jev_feedback",
+			Description: "Record whether a jev_query answer was actually usable, quoting the decision_id that " +
+				"came back with it. This is the only ground truth the system can have: the router cannot judge " +
+				"its own answers, so a label exists only if the consumer reports one. It is also the one call " +
+				"worth making when the answer was WRONG - a log of accepted answers cannot calibrate or train " +
+				"anything. accepted = usable as given; partial = needed correction or further work; rejected = " +
+				"wrong. Verdicts are append-only, so reporting a correction later is expected and safe; the " +
+				"latest verdict from the strongest source wins when the dataset is read.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"decision_id": map[string]interface{}{
+						"type":        "string",
+						"description": "The decision_id printed with the jev_query result being judged.",
+					},
+					"verdict": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"accepted", "rejected", "partial"},
+						"description": "accepted = usable as given; partial = needed correction or more work; rejected = wrong.",
+					},
+					"comment": map[string]interface{}{
+						"type":        "string",
+						"description": "What was wrong or missing. Short and specific: it becomes part of the dataset.",
+					},
+					"source": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"agent", "human", "script"},
+						"default":     "agent",
+						"description": "Who is judging. A human verdict outranks an agent's when both exist.",
+					},
+				},
+				"required": []string{"decision_id", "verdict"},
+			},
+		},
 	}
 }
 
@@ -104,6 +139,41 @@ func formatQueryResult(r *QueryResult, execute bool) string {
 	}
 	if r.RAGConfiguration.LightRAGMode != "" {
 		fmt.Fprintf(&b, "\nlightrag: mode=%s required=%t", r.RAGConfiguration.LightRAGMode, r.RAGConfiguration.LightRAGRequired)
+	}
+	if r.DecisionID != "" {
+		// Printed on every answer because a verdict is worth nothing without it, and the
+		// caller has no other way to learn the id.
+		fmt.Fprintf(&b, "\ndecision_id: %s (report a verdict with jev_feedback)", r.DecisionID)
+	}
+
+	return b.String()
+}
+
+// formatFeedback renders a recorded verdict. It states plainly when the verdict corrected
+// an earlier one and when it landed on a decision the router does not know about, because
+// a label that attaches to nothing is the failure mode that would quietly invalidate the
+// whole dataset.
+func formatFeedback(r *FeedbackResult, comment string) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "verdict recorded: %s (source: %s)", r.Verdict, r.Source)
+	fmt.Fprintf(&b, "\ndecision_id: %s", r.DecisionID)
+
+	if r.VerdictsForDecision > 1 {
+		fmt.Fprintf(&b, "\nthis is verdict #%d for that decision", r.VerdictsForDecision)
+		if r.PreviousVerdict != nil {
+			fmt.Fprintf(&b, "; it replaces %q", *r.PreviousVerdict)
+		}
+	} else {
+		fmt.Fprintf(&b, "\nthis is the first verdict for that decision")
+	}
+
+	if !r.KnownDecision {
+		fmt.Fprintf(&b, "\nWARNING: the decision log does not contain this id. The verdict was kept, "+
+			"but it labels nothing until the decision it points at exists - check for a typo in decision_id.")
+	}
+	if strings.TrimSpace(comment) != "" {
+		fmt.Fprintf(&b, "\ncomment: %s", strings.TrimSpace(comment))
 	}
 
 	return b.String()

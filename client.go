@@ -55,6 +55,9 @@ type RAGConfiguration struct {
 // (null) from a fallback whose name happens to be empty; collapsing the two
 // would lose the distinction the router was built to report.
 type QueryResult struct {
+	// DecisionID identifies the decision record this answer produced. It is the handle a
+	// verdict attaches to, and the caller has to quote it back to jev_feedback.
+	DecisionID        string            `json:"decision_id"`
 	RoutingDecision   RoutingDecision   `json:"routing_decision"`
 	ExtractedMetadata ExtractedMetadata `json:"extracted_metadata"`
 	RAGConfiguration  RAGConfiguration  `json:"rag_configuration"`
@@ -64,6 +67,17 @@ type QueryResult struct {
 	ElapsedMS         float64           `json:"elapsed_ms"`
 	Degraded          bool              `json:"degraded"`
 	FallbackReason    *string           `json:"fallback_reason"`
+}
+
+// FeedbackResult mirrors the /feedback response.
+type FeedbackResult struct {
+	Recorded            bool    `json:"recorded"`
+	DecisionID          string  `json:"decision_id"`
+	KnownDecision       bool    `json:"known_decision"`
+	Verdict             string  `json:"verdict"`
+	Source              string  `json:"source"`
+	VerdictsForDecision int     `json:"verdicts_for_decision"`
+	PreviousVerdict     *string `json:"previous_verdict"`
 }
 
 // Query sends one query to the router. execute=true lets the router synthesise
@@ -83,6 +97,31 @@ func (c *JevClient) Query(ctx context.Context, query string, execute bool) (*Que
 		// Not an error: a router with every tier parked legitimately has
 		// nothing to say. The caller reports it as an empty answer.
 		return &result, nil
+	}
+	return &result, nil
+}
+
+// Feedback records a verdict on a decision the router made. This is the only ground truth
+// the system can have: the router cannot judge its own answer, so a label can only come
+// from a consumer. Reporting a verdict is what turns a log line into a training example.
+func (c *JevClient) Feedback(ctx context.Context, decisionID, verdict, source, comment string) (*FeedbackResult, error) {
+	if strings.TrimSpace(decisionID) == "" {
+		return nil, fmt.Errorf("feedback needs the decision_id of the answer being judged")
+	}
+
+	payload, err := json.Marshal(map[string]interface{}{
+		"decision_id": decisionID,
+		"verdict":     verdict,
+		"source":      source,
+		"comment":     comment,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode feedback: %w", err)
+	}
+
+	var result FeedbackResult
+	if err := c.post(ctx, "/feedback", payload, &result); err != nil {
+		return nil, err
 	}
 	return &result, nil
 }

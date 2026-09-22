@@ -98,6 +98,41 @@ def main() -> int:
         bad = read()["result"]
         print(f"7. пустой query    -> isError={bad.get('isError', False)}: "
               f"{bad['content'][0]['text']}")
+
+        # The labelling loop. An answer only becomes a training example once a verdict is
+        # attached to it, so this is the part that has to work over the real transport and
+        # not just against a stub.
+        send({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+              "params": {"name": "jev_query",
+                         "arguments": {"query": "порядок регулировки зазоров клапанов",
+                                       "execute": True}}})
+        answered_text = read()["result"]["content"][0]["text"]
+        decision_id = ""
+        for line in answered_text.splitlines():
+            if line.startswith("decision_id: "):
+                decision_id = line.split()[1]
+        print(f"8. jev_query                -> decision_id={decision_id}")
+        if not decision_id:
+            raise SystemExit("provenance carried no decision_id, so the answer cannot be labelled")
+
+        send({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+              "params": {"name": "jev_feedback",
+                         "arguments": {"decision_id": decision_id,
+                                       "verdict": "partial",
+                                       "source": "agent",
+                                       "comment": "зазоры указаны, но не сказано, что двигатель должен быть холодным"}}})
+        verdict = read()["result"]
+        verdict_lines = verdict["content"][0]["text"].splitlines()
+        print(f"9. jev_feedback             -> isError={verdict.get('isError', False)}, "
+              f"{' | '.join(verdict_lines[:2])}")
+
+        send({"jsonrpc": "2.0", "id": 10, "method": "tools/call",
+              "params": {"name": "jev_feedback",
+                         "arguments": {"decision_id": decision_id, "verdict": "unknown"}}})
+        abstention = read()["result"]
+        print(f"10. абстиненция 'unknown'   -> isError={abstention.get('isError', False)}: "
+              f"{abstention['content'][0]['text'][:110]}")
+
         return 0
     finally:
         proc.stdin.close()

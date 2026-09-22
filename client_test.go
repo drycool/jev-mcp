@@ -14,6 +14,7 @@ import (
 // installation (graph tier parked, exact FTS5 hit), so the parser is exercised
 // against the shape that actually comes back rather than an invented one.
 const stubQueryResponse = `{
+  "decision_id": "9f2c41b7aa5e4d1e8c3f0b6a2d7e5f18",
   "routing_decision": {"strategy": "exact_fts", "confidence_score": 0.95, "fast_path_exit": false},
   "extracted_metadata": {"intent": "exact_search", "keywords": ["момент", "затяжки"], "entities": [], "domain": "general"},
   "rag_configuration": {"lightrag_required": false, "lightrag_mode": "skip", "similarity_threshold": 0.8},
@@ -166,6 +167,55 @@ func TestHealthParsesUnknownFieldsRatherThanDroppingThem(t *testing.T) {
 	}
 	if _, ok := health["a_field_invented_later"]; !ok {
 		t.Error("a field the client does not know about was dropped instead of preserved")
+	}
+}
+
+func TestFeedbackSendsTheVerdictAndParsesTheResult(t *testing.T) {
+	var received map[string]interface{}
+	client, _ := stubJev(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/feedback" {
+			t.Errorf("path = %s, want /feedback", r.URL.Path)
+		}
+		decoded := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&decoded); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		received = decoded
+		_, _ = w.Write([]byte(`{"recorded":true,"decision_id":"abc123","known_decision":true,
+			"verdict":"rejected","source":"human","verdicts_for_decision":2,"previous_verdict":"accepted"}`))
+	})
+
+	result, err := client.Feedback(context.Background(), "abc123", "rejected", "human", "не тот момент")
+	if err != nil {
+		t.Fatalf("Feedback returned error: %v", err)
+	}
+
+	if received["decision_id"] != "abc123" || received["verdict"] != "rejected" {
+		t.Errorf("sent %v, want the decision id and verdict forwarded", received)
+	}
+	if received["source"] != "human" {
+		t.Errorf("source = %v, want human preserved (it outranks an agent verdict)", received["source"])
+	}
+	if !result.KnownDecision {
+		t.Error("known_decision = false, want true")
+	}
+	if result.VerdictsForDecision != 2 {
+		t.Errorf("verdicts_for_decision = %d, want 2", result.VerdictsForDecision)
+	}
+	if result.PreviousVerdict == nil || *result.PreviousVerdict != "accepted" {
+		t.Errorf("previous_verdict = %v, want a pointer to \"accepted\"", result.PreviousVerdict)
+	}
+}
+
+// A verdict with no id would be recorded against nothing and quietly inflate the label
+// count, so it is refused before it reaches the network.
+func TestFeedbackRefusesAnEmptyDecisionID(t *testing.T) {
+	client, _ := stubJev(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the client called the router for a verdict that cannot be attached to anything")
+	})
+
+	if _, err := client.Feedback(context.Background(), "   ", "accepted", "agent", ""); err == nil {
+		t.Fatal("Feedback accepted an empty decision_id")
 	}
 }
 
