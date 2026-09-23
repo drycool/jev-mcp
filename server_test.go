@@ -367,6 +367,47 @@ func TestFormatQueryResultAnswersVerbatimAndReportsEmptyRouter(t *testing.T) {
 	}
 }
 
+// What the caller can see about its own context. A truncated context and a complete one
+// look identical from the answer alone - which is how a 4000-character prompt cap went
+// unnoticed in Jev for as long as it did - so the numbers are printed with the answer.
+func TestQueryProvenanceReportsTheContextThatWasAssembled(t *testing.T) {
+	withStats := formatQueryResult(&QueryResult{
+		AgentResponse:   "ответ",
+		RoutingDecision: RoutingDecision{Strategy: "exact_fts", ConfidenceScore: 0.95},
+		ContextStats: &ContextStats{
+			ChunksConsidered: 20, ChunksUsed: 16, ChunksDuplicate: 4,
+			Chars: 11718, Budget: 12000,
+		},
+	}, true)
+	for _, want := range []string{"context: 16/20 chunks", "4 duplicate dropped", "11718 chars", "of 12000 budget"} {
+		if !strings.Contains(withStats, want) {
+			t.Errorf("provenance is missing %q:\n%s", want, withStats)
+		}
+	}
+	if strings.Contains(withStats, "context was cut") {
+		t.Errorf("a pool that fitted the budget is reported as cut:\n%s", withStats)
+	}
+
+	exhausted := formatQueryResult(&QueryResult{
+		AgentResponse:   "ответ",
+		RoutingDecision: RoutingDecision{Strategy: "exact_fts"},
+		ContextStats:    &ContextStats{ChunksConsidered: 20, ChunksUsed: 11, Chars: 11900, Budget: 12000, BudgetExhausted: true},
+	}, true)
+	if !strings.Contains(exhausted, "budget exhausted, context was cut") {
+		t.Errorf("a cut context is not stated plainly:\n%s", exhausted)
+	}
+
+	// A path that composes its own context reports nothing rather than zeros, because
+	// "0/0 chunks" would read as an empty retrieval instead of an absent step.
+	noStats := formatQueryResult(&QueryResult{
+		AgentResponse:   "ответ",
+		RoutingDecision: RoutingDecision{Strategy: "direct_action"},
+	}, true)
+	if strings.Contains(noStats, "context: ") {
+		t.Errorf("an unassembled context is reported as if it had chunks:\n%s", noStats)
+	}
+}
+
 func TestCompactAndScalarHelpers(t *testing.T) {
 	if got := scalarList([]interface{}{"a", "b"}); got != "a, b" {
 		t.Errorf("scalarList = %q, want %q", got, "a, b")

@@ -38,7 +38,7 @@ Go 1.22+, stdlib only. Nothing to install.
 
 | tool | what it does |
 |---|---|
-| `jev_query` | Routes a question; returns the answer **plus provenance** — strategy, target agent, measured latency, degradation state, and the `decision_id` that makes the answer labellable. `execute=false` (default) returns routing and local context in milliseconds; `execute=true` also synthesises an answer through the agent tier and costs seconds. |
+| `jev_query` | Routes a question; returns the answer **plus provenance** — strategy, target agent, measured latency, degradation state, the context that was assembled and whether it was cut, and the `decision_id` that makes the answer labellable. `execute=false` (default) returns routing and local context in milliseconds; `execute=true` also synthesises an answer through the agent tier and costs seconds. |
 | `jev_health` | Which tiers are up and which configuration is in force (`lightrag_enabled`, `vector_timeout_s`, LLM host, shadow mode, labelling settings). Call this first when a call fails, hangs, or comes back empty, so a *disabled* tier is not mistaken for a broken one. |
 | `jev_stats` | Counters since start, every one of them including the zeros. An all-zero counter set is the evidence that nothing is calling the router. |
 | `jev_feedback` | Records whether a `jev_query` answer was actually usable, against the `decision_id` that came with it. This is the only ground truth the system can have, and the one call worth making when the answer was **wrong**. |
@@ -52,8 +52,17 @@ exact hit from a 10 s synthesis without guessing:
 strategy: exact_fts (0.95) · target: general_agent · elapsed: 10107 ms · degraded: false
 intent: exact_search · domain: general · keywords: момент, затяжки, болтов, головки
 lightrag: mode=skip required=false
+context: 16/20 chunks (4 duplicate dropped) · 11718 chars of 16000 budget
 decision_id: 6bbbf8b31b4b4a2a8072665b377c0408 (report a verdict with jev_feedback)
 ```
+
+The `context:` line is worth reading before trusting an answer, and it is here because its
+absence hid a real defect. A complete context and a truncated one produce answers of the same
+shape; the router was assembling context while the agent tier silently cut its prompt to 4000
+characters, and nothing in the response said so. `16/20 chunks` with `budget exhausted, context
+was cut` means the answer is working from part of what was retrieved. On paths that compose their
+own context — tier 1, the graph tier — the line is absent rather than zeroed, because "assembly
+did not run" and "assembly found nothing" are different claims.
 
 ## The labelling loop
 

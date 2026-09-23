@@ -67,6 +67,30 @@ type QueryResult struct {
 	ElapsedMS         float64           `json:"elapsed_ms"`
 	Degraded          bool              `json:"degraded"`
 	FallbackReason    *string           `json:"fallback_reason"`
+	// A pointer because the router omits this block on paths that compose their own
+	// context (tier 1, the graph tier), and "no assembly happened" is not the same claim
+	// as "assembly considered zero chunks".
+	ContextStats *ContextStats `json:"context_stats"`
+}
+
+// ContextStats is what retrieval actually handed the agent, as reported by the router.
+//
+// It is forwarded verbatim because the numbers are the only way a caller can tell a
+// complete answer from a quietly truncated one: a low ChunksUsed against a high
+// ChunksConsidered means the budget was the binding constraint, and ChunksDuplicate above
+// zero means the index carried the same text twice. The router gained these fields after an
+// answer came back incomplete and nothing in the logs said how much context had arrived.
+//
+// Field names mirror the server's context_stats block; a field added there has to be added
+// here to be visible through MCP.
+type ContextStats struct {
+	ChunksConsidered int  `json:"chunks_considered"`
+	ChunksUsed       int  `json:"chunks_used"`
+	ChunksDuplicate  int  `json:"chunks_duplicate"`
+	ChunksTooLarge   int  `json:"chunks_too_large"`
+	Chars            int  `json:"chars"`
+	Budget           int  `json:"budget"`
+	BudgetExhausted  bool `json:"budget_exhausted"`
 }
 
 // FeedbackResult mirrors the /feedback response.

@@ -146,6 +146,21 @@ func formatQueryResult(r *QueryResult, execute bool) string {
 	if r.RAGConfiguration.LightRAGMode != "" {
 		fmt.Fprintf(&b, "\nlightrag: mode=%s required=%t", r.RAGConfiguration.LightRAGMode, r.RAGConfiguration.LightRAGRequired)
 	}
+	if s := r.ContextStats; s != nil {
+		// Printed on the answer rather than hidden behind a second call: whether the
+		// context was cut is part of judging whether the answer can be trusted.
+		fmt.Fprintf(&b, "\ncontext: %d/%d chunks", s.ChunksUsed, s.ChunksConsidered)
+		if s.ChunksDuplicate > 0 {
+			fmt.Fprintf(&b, " (%d duplicate dropped)", s.ChunksDuplicate)
+		}
+		fmt.Fprintf(&b, " · %d chars", s.Chars)
+		if s.Budget > 0 {
+			fmt.Fprintf(&b, " of %d budget", s.Budget)
+		}
+		if s.BudgetExhausted {
+			b.WriteString(" · budget exhausted, context was cut")
+		}
+	}
 	if r.DecisionID != "" {
 		// Printed on every answer because a verdict is worth nothing without it, and the
 		// caller has no other way to learn the id.

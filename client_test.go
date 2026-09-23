@@ -23,7 +23,10 @@ const stubQueryResponse = `{
   "agent_response": "",
   "elapsed_ms": 21.36,
   "degraded": false,
-  "fallback_reason": null
+  "fallback_reason": null,
+  "context_stats": {"chunks_considered": 20, "chunks_used": 16, "chunks_duplicate": 4,
+                    "chunks_too_large": 0, "chars": 11718, "budget": 12000,
+                    "budget_exhausted": false}
 }`
 
 func stubJev(t *testing.T, handler http.HandlerFunc) (*JevClient, *httptest.Server) {
@@ -64,6 +67,55 @@ func TestQueryParsesAnswerAndProvenance(t *testing.T) {
 	}
 	if result.RAGConfiguration.LightRAGMode != "skip" {
 		t.Errorf("lightrag_mode = %q, want skip", result.RAGConfiguration.LightRAGMode)
+	}
+}
+
+func TestQueryParsesContextStats(t *testing.T) {
+	client, _ := stubJev(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(stubQueryResponse))
+	})
+
+	result, err := client.Query(context.Background(), "момент затяжки", false)
+	if err != nil {
+		t.Fatalf("Query returned error: %v", err)
+	}
+	if result.ContextStats == nil {
+		t.Fatal("context_stats = nil, want the block the router sends")
+	}
+	if result.ContextStats.ChunksUsed != 16 || result.ContextStats.ChunksConsidered != 20 {
+		t.Errorf("chunks = %d/%d, want 16/20",
+			result.ContextStats.ChunksUsed, result.ContextStats.ChunksConsidered)
+	}
+	if result.ContextStats.ChunksDuplicate != 4 {
+		t.Errorf("chunks_duplicate = %d, want 4", result.ContextStats.ChunksDuplicate)
+	}
+	if result.ContextStats.Chars != 11718 || result.ContextStats.Budget != 12000 {
+		t.Errorf("chars/budget = %d/%d, want 11718/12000",
+			result.ContextStats.Chars, result.ContextStats.Budget)
+	}
+	if result.ContextStats.BudgetExhausted {
+		t.Error("budget_exhausted = true, want false for a pool that fitted")
+	}
+}
+
+// The router omits context_stats on paths that compose their own context, and "no
+// assembly happened" is a different statement from "assembly considered zero chunks".
+// A value type here would silently turn the first into the second.
+func TestQueryDistinguishesMissingContextStatsFromZeroes(t *testing.T) {
+	body := strings.Replace(stubQueryResponse,
+		`"context_stats": {"chunks_considered": 20, "chunks_used": 16, "chunks_duplicate": 4,
+                    "chunks_too_large": 0, "chars": 11718, "budget": 12000,
+                    "budget_exhausted": false}`, `"context_stats": null`, 1)
+	client, _ := stubJev(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	})
+
+	result, err := client.Query(context.Background(), "q", false)
+	if err != nil {
+		t.Fatalf("Query returned error: %v", err)
+	}
+	if result.ContextStats != nil {
+		t.Errorf("context_stats = %+v, want nil when the router omits it", result.ContextStats)
 	}
 }
 
