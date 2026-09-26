@@ -12,7 +12,59 @@ import (
 func newTestServer(t *testing.T, handler http.HandlerFunc) *Server {
 	t.Helper()
 	client, _ := stubJev(t, handler)
-	return NewServer(client, 2*time.Second)
+	return NewServer(client, 2*time.Second, 2*time.Second)
+}
+
+// The two modes cost different things, so they get different budgets: a single
+// number either cuts a synthesis short or makes a material call wait as long as
+// one.  Measured on this installation: material in tens of milliseconds, a warm
+// synthesis in about 9 s, a cold one in 39.45 s.
+func TestAMaterialCallIsBoundedByTheMaterialDeadline(t *testing.T) {
+	client, _ := stubJev(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = w.Write([]byte(stubQueryResponse))
+	})
+	server := NewServer(client, 80*time.Millisecond, 3*time.Second)
+
+	result := server.callTool(CallToolParams{Name: "jev_query", Arguments: json.RawMessage(`{"query":"вопрос"}`)})
+	if !result.IsError {
+		t.Fatalf("a slow call was not cut at the material deadline: %+v", result)
+	}
+	if !strings.Contains(firstText(t, result), "did not answer") {
+		t.Errorf("the deadline was not reported as one: %s", firstText(t, result))
+	}
+}
+
+func TestASynthesisCallGetsTheSynthesisDeadline(t *testing.T) {
+	client, _ := stubJev(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = w.Write([]byte(stubQueryResponse))
+	})
+	// Same slow router, same code path: only the mode differs, and the synthesis
+	// budget is what makes it survive.
+	server := NewServer(client, 80*time.Millisecond, 3*time.Second)
+
+	result := server.callTool(CallToolParams{Name: "jev_query",
+		Arguments: json.RawMessage(`{"query":"вопрос","execute":true}`)})
+	if result.IsError {
+		t.Fatalf("a synthesis was cut at the material deadline: %+v", result)
+	}
+}
+
+// A caller that passes its own budget overrides both modes, because it is the
+// only one that knows what it is willing to wait for.
+func TestACallerBudgetOverridesTheModeDeadline(t *testing.T) {
+	client, _ := stubJev(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = w.Write([]byte(stubQueryResponse))
+	})
+	server := NewServer(client, 80*time.Millisecond, 80*time.Millisecond)
+
+	result := server.callTool(CallToolParams{Name: "jev_query",
+		Arguments: json.RawMessage(`{"query":"вопрос","execute":true,"timeout_s":3}`)})
+	if result.IsError {
+		t.Fatalf("the caller's own budget was ignored: %+v", result)
+	}
 }
 
 func frame(id, method, params string) Request {

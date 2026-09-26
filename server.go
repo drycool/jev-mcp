@@ -14,14 +14,26 @@ import (
 
 // Server implements the MCP server side of the stdio transport.
 type Server struct {
-	client         *JevClient
-	defaultTimeout time.Duration
+	client *JevClient
+	// materialTimeout bounds a call that never calls a model; synthTimeout
+	// bounds one that may.  They are separate because a single budget cannot
+	// cover both cheap and expensive modes without either cutting the expensive
+	// one short or making the cheap one look as slow as the expensive one.
+	materialTimeout time.Duration
+	synthTimeout    time.Duration
 }
 
-// NewServer wires a server to a router client. defaultTimeout bounds a single
-// tool call when the caller does not ask for its own budget.
-func NewServer(client *JevClient, defaultTimeout time.Duration) *Server {
-	return &Server{client: client, defaultTimeout: defaultTimeout}
+// NewServer wires a server to a router client.  Two deadlines, because the two
+// modes cost different things and one number could not bound both: measured on
+// this installation, material-only returns in tens of milliseconds, a warm
+// synthesis in about 9 s, and a cold one in 39.45 s.  The single 30 s deadline
+// that used to bound everything sat below the worst case, so a correct answer
+// arrived nine seconds after the consumer had given up and reported the base as
+// unreachable.  materialTimeout bounds a call that never calls a model;
+// synthTimeout bounds one that may.  A caller that passes its own timeout_s
+// overrides both.
+func NewServer(client *JevClient, materialTimeout, synthTimeout time.Duration) *Server {
+	return &Server{client: client, materialTimeout: materialTimeout, synthTimeout: synthTimeout}
 }
 
 // Serve reads newline-delimited JSON-RPC frames from in and writes responses to
@@ -126,12 +138,20 @@ func (s *Server) callTool(params CallToolParams) CallToolResult {
 		if strings.TrimSpace(args.Query) == "" {
 			return errorResult("jev_query requires a non-empty `query`")
 		}
-		execute := true
+		// Default false: no model is called, so the caller gets the project's own
+		// material in milliseconds.  This used to default true, which sent every
+		// question the base could not answer decisively to the local model - 9 s
+		// warm and 39.45 s cold on this installation, past the deadline that then
+		// bounded the call.  See the schema comment for the measurement.
+		execute := false
 		if args.Execute != nil {
 			execute = *args.Execute
 		}
 
-		timeout := s.defaultTimeout
+		timeout := s.materialTimeout
+		if execute {
+			timeout = s.synthTimeout
+		}
 		if args.TimeoutS > 0 {
 			timeout = time.Duration(args.TimeoutS * float64(time.Second))
 		}
@@ -145,7 +165,7 @@ func (s *Server) callTool(params CallToolParams) CallToolResult {
 		return textResult(formatQueryResult(result, execute))
 
 	case "jev_health":
-		ctx, cancel := context.WithTimeout(context.Background(), s.defaultTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), s.materialTimeout)
 		defer cancel()
 		health, err := s.client.Health(ctx)
 		if err != nil {
@@ -154,7 +174,7 @@ func (s *Server) callTool(params CallToolParams) CallToolResult {
 		return textResult(formatHealth(health))
 
 	case "jev_stats":
-		ctx, cancel := context.WithTimeout(context.Background(), s.defaultTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), s.materialTimeout)
 		defer cancel()
 		stats, err := s.client.Stats(ctx)
 		if err != nil {
@@ -190,7 +210,7 @@ func (s *Server) callTool(params CallToolParams) CallToolResult {
 			return errorResult("jev_feedback source must be one of agent, human, script (got " + strconv.Quote(source) + ")")
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), s.defaultTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), s.materialTimeout)
 		defer cancel()
 		result, err := s.client.Feedback(ctx, FeedbackRequest{
 			DecisionID: args.DecisionID,

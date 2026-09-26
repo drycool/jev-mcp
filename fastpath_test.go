@@ -63,11 +63,16 @@ func TestAModelsAnswerStillStartsTheBody(t *testing.T) {
 	}
 }
 
-// The schema says `default: true`, and a schema default is advisory: most MCP clients never
-// apply it, so an omitted key reaches this server as an absent key. It used to be decoded
-// into a plain bool, which made the documented default false in practice and silently sent
-// the caller down the context-only path.
-func TestOmittedExecuteAsksForAnAnswer(t *testing.T) {
+// A schema default is advisory: most MCP clients never apply it, so an omitted key
+// reaches this server as an absent key, and the server has to resolve it itself.
+//
+// This resolved to true until measured otherwise.  true means a model call for every
+// question the base cannot answer decisively, and on this installation that is 9 s warm
+// and 39.45 s cold, while the material itself arrives in tens of milliseconds.  In a live
+// session those 39.45 s crossed the consumer's deadline: the client reported the router as
+// unreachable and the agent spent the turn reading files by hand, although 16 KB of
+// material had been assembled and was waiting.  Material first; synthesis on request.
+func TestOmittedExecuteAsksForMaterialWithoutAModel(t *testing.T) {
 	var received map[string]interface{}
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		decoded := map[string]interface{}{}
@@ -80,8 +85,8 @@ func TestOmittedExecuteAsksForAnAnswer(t *testing.T) {
 
 	server.handle(frame("22", "tools/call", `{"name":"jev_query","arguments":{"query":"вопрос"}}`))
 
-	if received["execute"] != true {
-		t.Errorf("execute = %v, want true when the caller omitted it", received["execute"])
+	if received["execute"] != false {
+		t.Errorf("execute = %v, want false when the caller omitted it", received["execute"])
 	}
 }
 

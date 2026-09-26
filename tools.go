@@ -27,9 +27,10 @@ func toolDefinitions() []Tool {
 				"in tens of milliseconds and without calling any model. Check here before reasoning, " +
 				"before reading files, and before searching the web: an answer that already exists " +
 				"locally should not be derived a second time. " +
-				"execute=true (default) returns an answer - the local material when it is decisive, " +
-				"otherwise the local model's. execute=false never calls a model: it returns the whole " +
-				"material plus the routing decision, for a caller that will answer itself. " +
+				"By default no model is called at all: the material and the routing decision come " +
+				"back, and you answer from them. Pass execute=true when you want the local model to " +
+				"write the answer instead - that costs seconds, and up to a minute if the model is " +
+				"cold, so it is for when you want prose, not when you want the facts. " +
 				"Every response states which of those happened (fast_path_exit, fast_path_reason, " +
 				"local_material_decisive, degraded), so material from the project's own base is never " +
 				"mistaken for a model's prose.",
@@ -42,16 +43,25 @@ func toolDefinitions() []Tool {
 					},
 					"execute": map[string]interface{}{
 						"type": "boolean",
-						// Default true because the useful default is "give me the answer", and
-						// because the fast path made it cheap: decisive material returns in
-						// tens of milliseconds and no model is called at all. It used to
-						// default false on the reasoning that the model call cost seconds -
-						// which left the caller with a 500-character preview and no answer,
-						// and taught it that the gateway was not worth calling.
-						"default": true,
-						"description": "true: answer, from local material when it is decisive (fast, no model) " +
-							"else from the local model. false: no model ever - return the material and the " +
-							"routing decision only, and answer it yourself.",
+						// Default false: the cheap answer is the useful one.  It used to
+						// default true, and the two reasons it did are both gone or
+						// outweighed now.  Gone: false used to return a 500-character
+						// preview, so a caller that wanted the material got nothing
+						// usable - the whole material is returned now.  Outweighed:
+						// true means a model call for every question the base cannot
+						// answer decisively, and measured on this installation that is
+						// 9 s warm and 39.45 s when the model has to be loaded, while
+						// the material itself arrives in tens of milliseconds.  In a
+						// live session that 39.45 s crossed the consumer's 30 s
+						// deadline, the client reported "unreachable", and the agent
+						// spent the turn reading files by hand although 16 KB of
+						// material was assembled and waiting.
+						"default": false,
+						"description": "false (default): no model is ever called - the project's own " +
+							"material plus the routing decision comes back in milliseconds, and you " +
+							"reason over it yourself. true: if the material is not decisive, ask the " +
+							"local model to write the answer - seconds warm, up to about a minute if " +
+							"the model has to be loaded first.",
 					},
 					"timeout_s": map[string]interface{}{
 						"type":        "number",

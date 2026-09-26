@@ -25,8 +25,20 @@ import (
 )
 
 func main() {
-	client := NewJevClient(envOr("JEV_URL", "http://127.0.0.1:8030"), secondsFromEnv("JEV_TIMEOUT_S", 30))
-	server := NewServer(client, secondsFromEnv("JEV_TIMEOUT_S", 30))
+	// Two deadlines for the two modes.  A material-only call returns in tens of
+	// milliseconds; a synthesis may call the local model, measured on this
+	// installation at 9 s warm and 39.45 s when the model has to be loaded first.
+	// JEV_SYNTH_TIMEOUT_S must stay above the router's own LLM read timeout
+	// (JEV_LLM_READ_TIMEOUT_S, 60 s by default) plus overhead, or a correct
+	// answer is thrown away a second time.
+	//
+	// The HTTP client gets the larger of the two: the per-call context is what
+	// bounds each mode, and a client-level timeout below it would cut a
+	// synthesis short no matter what the context said.
+	materialTimeout := secondsFromEnv("JEV_TIMEOUT_S", 30)
+	synthTimeout := secondsFromEnv("JEV_SYNTH_TIMEOUT_S", 75)
+	client := NewJevClient(envOr("JEV_URL", "http://127.0.0.1:8030"), synthTimeout)
+	server := NewServer(client, materialTimeout, synthTimeout)
 
 	// The client (the agent) closes stdin when it exits or restarts us; without
 	// this the process would linger holding a dead pipe.

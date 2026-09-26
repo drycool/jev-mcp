@@ -16,12 +16,20 @@ lookups:
 | command (tier 1, no LLM) | 2 ms |
 | exact FTS5 hit, context only (`execute=false`) | 9–39 ms |
 | no local hit, graph tier parked | 157 ms |
-| agent-tier synthesis (`execute=true`) | 10.1 s |
+| agent-tier synthesis (`execute=true`), model resident | 9.1 s |
+| agent-tier synthesis, model has to be loaded first | **39.45 s** |
 | the same question through LightRAG's graph directly | 37.0 s |
 
 The last two rows are why the router is worth a hop: for a manual lookup the graph was both
 **3.7× slower and off-topic** (it answered about an Argon ONE V3 Raspberry Pi case), because
 its knowledge base mixes the Espero manual with Raspberry Pi accessory notes.
+
+The cold row is also why `execute` defaults to **false**. On 2026-09-26 a live agent session
+asked a question the base could not answer decisively: the router called the model, the model
+had to be loaded, and the answer arrived at 39.45 s — nine seconds *after* the consumer's 30 s
+deadline had expired. The client reported the router as unreachable, the agent concluded the
+base had nothing to say, and spent the turn reading files by hand while 16 KB of assembled
+material waited. Material first; synthesis on request, with a budget that fits it.
 
 ## Build
 
@@ -146,7 +154,15 @@ One server, three clients: MCP is the interface, so no per-agent plugin is neede
 | variable | default | meaning |
 |---|---|---|
 | `JEV_URL` | `http://127.0.0.1:8030` | router base URL |
-| `JEV_TIMEOUT_S` | `30` | budget for one tool call; `jev_query`'s `timeout_s` argument overrides it per call |
+| `JEV_TIMEOUT_S` | `30` | budget for a call that never calls a model (`execute=false`); `jev_query`'s `timeout_s` argument overrides it per call |
+| `JEV_SYNTH_TIMEOUT_S` | `75` | budget for a call that may call the model (`execute=true`) |
+
+Two budgets because the two modes are three orders of magnitude apart, and one number could
+not bound both without either cutting a synthesis short or making a cheap call look slow.
+`JEV_SYNTH_TIMEOUT_S` must stay **above the router's own read timeout for the model call**
+(`JEV_LLM_READ_TIMEOUT_S`, 60 s by default) plus overhead: a consumer deadline below the
+router's is how a correct answer gets thrown away, which is exactly what happened at 39.45 s
+against 30 s. Raising the router's timeout without raising this one reintroduces that gap.
 
 An invalid `JEV_TIMEOUT_S` is ignored with a note on stderr rather than preventing startup:
 a typo in an environment variable should not leave the agent with no router at all.
