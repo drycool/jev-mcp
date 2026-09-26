@@ -31,7 +31,16 @@ func NewJevClient(baseURL string, timeout time.Duration) *JevClient {
 type RoutingDecision struct {
 	Strategy        string  `json:"strategy"`
 	ConfidenceScore float64 `json:"confidence_score"`
-	FastPathExit    bool    `json:"fast_path_exit"`
+	// FastPathExit reports that this request was answered from local material without
+	// calling a model at all. It is the request-level outcome, not tier 1's own signal.
+	FastPathExit bool `json:"fast_path_exit"`
+	// FastPathReason names which kind of material earned that exit
+	// (fts_exact_high_confidence / vector_decisive_similarity), or is null when the model
+	// was called. A consumer that wants to say "this came from your own notes, not from a
+	// model" needs the reason, not just the flag.
+	FastPathReason *string `json:"fast_path_reason"`
+	// LocalMaterialDecisive is the coarse bit: may facts from this be stated.
+	LocalMaterialDecisive bool `json:"local_material_decisive"`
 }
 
 // ExtractedMetadata mirrors /query -> extracted_metadata.
@@ -62,7 +71,10 @@ type QueryResult struct {
 	ExtractedMetadata ExtractedMetadata `json:"extracted_metadata"`
 	RAGConfiguration  RAGConfiguration  `json:"rag_configuration"`
 	TargetAgent       string            `json:"target_agent"`
+	// ContextPreview is 500 characters: enough to see whether retrieval worked, not enough
+	// to use. Context is the assembled material whole.
 	ContextPreview    string            `json:"context_preview"`
+	Context           string            `json:"context"`
 	AgentResponse     string            `json:"agent_response"`
 	ElapsedMS         float64           `json:"elapsed_ms"`
 	Degraded          bool              `json:"degraded"`
@@ -91,6 +103,11 @@ type ContextStats struct {
 	Chars            int  `json:"chars"`
 	Budget           int  `json:"budget"`
 	BudgetExhausted  bool `json:"budget_exhausted"`
+	// Sources are the files the used chunks came from, in the order they were used.
+	// Forwarded because on the fast path the material IS the answer: an agent that passes
+	// that material on to a human has to be able to say which file it came from, and the
+	// material is not reproducible from a hash.
+	Sources []string `json:"sources"`
 }
 
 // FeedbackResult mirrors the /feedback response.

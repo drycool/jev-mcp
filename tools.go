@@ -14,13 +14,25 @@ func toolDefinitions() []Tool {
 	return []Tool{
 		{
 			Name: "jev_query",
-			Description: "Route a question through the Jev gateway, which picks the cheapest tier that can " +
-				"answer it: an exact FTS5 hit, a vector hit, the LightRAG graph, or an LLM agent. " +
-				"Always returns provenance alongside the answer - which strategy answered, how long it took, " +
-				"and whether any tier degraded. Prefer this over querying the vector store or the graph " +
-				"directly, because the router already knows which of them is worth the wait. " +
-				"execute=false (default) returns the routing decision and local context in milliseconds; " +
-				"execute=true also synthesises an answer through the agent tier and costs seconds.",
+			// The first sentence carries the trigger, deliberately: a client shows the model
+			// a shortened description in its tool index, and a mandate that only appears in
+			// the fourth line is a mandate the model decides without. What was here before
+			// opened with "Route a question through the Jev gateway, which picks the cheapest
+			// tier that can answer it" - a description of the machine, and a closing warning
+			// that execute=true "costs seconds" - so the one thing an agent optimising for
+			// its own latency learned was to avoid the call.
+			Description: "Call FIRST for anything about this project. The corpus is what the project " +
+				"already worked out - conclusions from past sessions, configs, manuals, decisions, " +
+				"defects - and a decisive hit returns that material itself, with the files it came from, " +
+				"in tens of milliseconds and without calling any model. Check here before reasoning, " +
+				"before reading files, and before searching the web: an answer that already exists " +
+				"locally should not be derived a second time. " +
+				"execute=true (default) returns an answer - the local material when it is decisive, " +
+				"otherwise the local model's. execute=false never calls a model: it returns the whole " +
+				"material plus the routing decision, for a caller that will answer itself. " +
+				"Every response states which of those happened (fast_path_exit, fast_path_reason, " +
+				"local_material_decisive, degraded), so material from the project's own base is never " +
+				"mistaken for a model's prose.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -29,9 +41,17 @@ func toolDefinitions() []Tool {
 						"description": "The question or task text to route.",
 					},
 					"execute": map[string]interface{}{
-						"type":        "boolean",
-						"default":     false,
-						"description": "true lets the router synthesise an answer through its agent tier (LLM, seconds). false returns routing plus local context only (milliseconds).",
+						"type": "boolean",
+						// Default true because the useful default is "give me the answer", and
+						// because the fast path made it cheap: decisive material returns in
+						// tens of milliseconds and no model is called at all. It used to
+						// default false on the reasoning that the model call cost seconds -
+						// which left the caller with a 500-character preview and no answer,
+						// and taught it that the gateway was not worth calling.
+						"default": true,
+						"description": "true: answer, from local material when it is decisive (fast, no model) " +
+							"else from the local model. false: no model ever - return the material and the " +
+							"routing decision only, and answer it yourself.",
 					},
 					"timeout_s": map[string]interface{}{
 						"type":        "number",
@@ -113,14 +133,40 @@ func formatQueryResult(r *QueryResult, execute bool) string {
 	var b strings.Builder
 
 	answer := strings.TrimSpace(r.AgentResponse)
-	context := strings.TrimSpace(r.ContextPreview)
+	context := strings.TrimSpace(r.Context)
+	if context == "" {
+		// Older servers only send the preview; falling back keeps the tool usable against
+		// them instead of printing an empty answer.
+		context = strings.TrimSpace(r.ContextPreview)
+	}
+	decisive := r.RoutingDecision.LocalMaterialDecisive
 
+	// The first line has to answer one question the agent cannot answer for itself: is this
+	// the project's own known answer, a model's prose, or something related that settles
+	// nothing? An agent that cannot tell re-derives the answer it was just handed, which is
+	// the reasoning this tool exists to replace. The answer itself still starts the body in
+	// every case where a model wrote it, so a caller that only wants the text can stop
+	// reading at the separator.
 	switch {
+	case r.RoutingDecision.FastPathExit && answer != "":
+		// Material from the corpus, returned as the answer. The line goes before the text
+		// because this text is not a model's opinion - it is the file, and it may be stated
+		// as fact and quoted onward with its sources.
+		fmt.Fprintf(&b, "ANSWER FROM THE PROJECT'S OWN MATERIAL (no model was called; reason: %s)\n\n",
+			orDash(derefString(r.RoutingDecision.FastPathReason)))
+		b.WriteString(answer)
+
 	case answer != "":
 		b.WriteString(answer)
 
+	case context != "" && !execute && decisive:
+		b.WriteString("LOCAL MATERIAL, DECISIVE - treat this as the answer; execute=false, so no model " +
+			"was called\n\n")
+		b.WriteString(context)
+
 	case context != "" && !execute:
-		b.WriteString("[no synthesised answer: called with execute=false, which skips the agent tier by design]\n\n")
+		b.WriteString("LOCAL MATERIAL, NOT DECISIVE - related, but nothing here settles the question; " +
+			"judge it yourself (execute=false, so no model was called)\n\n")
 		b.WriteString(context)
 
 	case context != "":
@@ -128,11 +174,19 @@ func formatQueryResult(r *QueryResult, execute bool) string {
 		b.WriteString(context)
 
 	default:
-		b.WriteString("[the router returned neither an answer nor context]")
+		// Stated plainly rather than left empty: an empty result is information, and an
+		// agent that receives one silently carries on reasoning as if it had checked.
+		b.WriteString("[the router returned neither an answer nor context] Nothing local matches " +
+			"this question; answer from your own knowledge and say it did not come from the " +
+			"project's base.")
 	}
 
 	b.WriteString("\n\n———\n")
 	fmt.Fprintf(&b, "strategy: %s (%.2f)", orDash(r.RoutingDecision.Strategy), r.RoutingDecision.ConfidenceScore)
+	fmt.Fprintf(&b, " · local_material_decisive: %t", r.RoutingDecision.LocalMaterialDecisive)
+	if r.RoutingDecision.FastPathReason != nil {
+		fmt.Fprintf(&b, " · fast_path_reason: %s", *r.RoutingDecision.FastPathReason)
+	}
 	fmt.Fprintf(&b, " · target: %s", orDash(r.TargetAgent))
 	fmt.Fprintf(&b, " · elapsed: %.0f ms", r.ElapsedMS)
 	fmt.Fprintf(&b, " · degraded: %t", r.Degraded)
@@ -159,6 +213,11 @@ func formatQueryResult(r *QueryResult, execute bool) string {
 		}
 		if s.BudgetExhausted {
 			b.WriteString(" · budget exhausted, context was cut")
+		}
+		// The files the material came from, so a consumer can pass the answer on with its
+		// provenance instead of having to search for it again.
+		if len(s.Sources) > 0 {
+			fmt.Fprintf(&b, "\nsources: %s", strings.Join(s.Sources, ", "))
 		}
 	}
 	if r.DecisionID != "" {
@@ -254,6 +313,16 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// derefString unwraps an optional string, with nil reading as empty. The router
+// distinguishes "no fast-path reason" (null) from a reason, and the renderer is the
+// only place that distinction gets collapsed - so it is collapsed here, once.
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 func valueOr(m map[string]interface{}, key string, fallback interface{}) interface{} {

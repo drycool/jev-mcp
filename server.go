@@ -110,8 +110,14 @@ func (s *Server) callTool(params CallToolParams) CallToolResult {
 	switch params.Name {
 	case "jev_query":
 		var args struct {
-			Query    string  `json:"query"`
-			Execute  bool    `json:"execute"`
+			Query string `json:"query"`
+			// A pointer, because the schema's `default: true` is advisory: neither this
+			// server nor most MCP clients apply JSON-schema defaults, so an omitted key
+			// arrives as Go's zero value. With a plain bool that made the documented
+			// default false in practice - and the caller silently got the context-only
+			// path, which is the behaviour the schema was changed to stop being the
+			// default. Absent is now distinguished from false and resolved explicitly.
+			Execute  *bool   `json:"execute"`
 			TimeoutS float64 `json:"timeout_s"`
 		}
 		if err := unmarshalArgs(params.Arguments, &args); err != nil {
@@ -119,6 +125,10 @@ func (s *Server) callTool(params CallToolParams) CallToolResult {
 		}
 		if strings.TrimSpace(args.Query) == "" {
 			return errorResult("jev_query requires a non-empty `query`")
+		}
+		execute := true
+		if args.Execute != nil {
+			execute = *args.Execute
 		}
 
 		timeout := s.defaultTimeout
@@ -128,11 +138,11 @@ func (s *Server) callTool(params CallToolParams) CallToolResult {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
-		result, err := s.client.Query(ctx, args.Query, args.Execute)
+		result, err := s.client.Query(ctx, args.Query, execute)
 		if err != nil {
 			return errorResult(err.Error())
 		}
-		return textResult(formatQueryResult(result, args.Execute))
+		return textResult(formatQueryResult(result, execute))
 
 	case "jev_health":
 		ctx, cancel := context.WithTimeout(context.Background(), s.defaultTimeout)
