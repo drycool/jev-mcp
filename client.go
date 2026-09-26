@@ -4,12 +4,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
+
+// retryPause is how long to wait before asking a router that was not there once
+// more.  A variable rather than a constant only so a test does not have to spend
+// the real delay: the production value is roughly how long this router takes to
+// come back after a restart.
+var retryPause = 2 * time.Second
 
 // JevClient talks to the Jev router's HTTP API. It is deliberately thin: Jev
 // already owns routing, so the client only shapes the request and preserves the
@@ -73,12 +82,12 @@ type QueryResult struct {
 	TargetAgent       string            `json:"target_agent"`
 	// ContextPreview is 500 characters: enough to see whether retrieval worked, not enough
 	// to use. Context is the assembled material whole.
-	ContextPreview    string            `json:"context_preview"`
-	Context           string            `json:"context"`
-	AgentResponse     string            `json:"agent_response"`
-	ElapsedMS         float64           `json:"elapsed_ms"`
-	Degraded          bool              `json:"degraded"`
-	FallbackReason    *string           `json:"fallback_reason"`
+	ContextPreview string  `json:"context_preview"`
+	Context        string  `json:"context"`
+	AgentResponse  string  `json:"agent_response"`
+	ElapsedMS      float64 `json:"elapsed_ms"`
+	Degraded       bool    `json:"degraded"`
+	FallbackReason *string `json:"fallback_reason"`
 	// A pointer because the router omits this block on paths that compose their own
 	// context (tier 1, the graph tier), and "no assembly happened" is not the same claim
 	// as "assembly considered zero chunks".
@@ -228,7 +237,28 @@ func (c *JevClient) get(ctx context.Context, path string, out interface{}) error
 func (c *JevClient) do(req *http.Request, out interface{}) error {
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("router unreachable at %s: %w", c.baseURL, err)
+		if !worthRetrying(err) {
+			return fmt.Errorf("the router at %s did not answer within its budget: %w. "+
+				"It is working on something slow, not gone - ask again rather than "+
+				"concluding the material is absent", c.baseURL, err)
+		}
+		// The request never reached a working router.  Retried once, because the
+		// measured cost of not retrying is a whole turn: in a live session the
+		// router happened to be restarting, the consumer read "unreachable",
+		// concluded the base had nothing to say and spent the next forty seconds
+		// grepping the filesystem by hand.
+		time.Sleep(retryPause)
+		retry, rerr := rewind(req)
+		if rerr != nil {
+			return fmt.Errorf("router unreachable at %s: %w", c.baseURL, err)
+		}
+		resp, err = c.http.Do(retry)
+		if err != nil {
+			return fmt.Errorf("the base at %s was not there, twice %s apart: %w. "+
+				"It may be restarting - ask it again in a moment instead of reading "+
+				"files by hand, and do not treat this as the material being missing",
+				c.baseURL, retryPause, err)
+		}
 	}
 	defer resp.Body.Close()
 
@@ -245,6 +275,39 @@ func (c *JevClient) do(req *http.Request, out interface{}) error {
 		return fmt.Errorf("decode response: %w", err)
 	}
 	return nil
+}
+
+// rewind returns a copy of the request with a fresh body, or an error when the
+// original cannot be replayed.  net/http sets GetBody for the readers this
+// client builds, so in practice it always can.
+func rewind(req *http.Request) (*http.Request, error) {
+	if req.GetBody == nil {
+		return nil, errors.New("request body cannot be rewound")
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return nil, err
+	}
+	clone := req.Clone(req.Context())
+	clone.Body = body
+	return clone, nil
+}
+
+// worthRetrying separates "the base is not there" from "the base is working and
+// we ran out of time".
+//
+// A refused connection, a reset, or a connection closed before it answered all
+// mean no router process was there to answer, and asking again is exactly right.
+// A deadline means the request was being worked on: repeating it inside the same
+// expired budget would spend the caller's remaining time to no purpose.  This
+// router's slow path calls a model, so a deadline on it is a real answer - and
+// the error message says so, so an agent does not learn to avoid the base.
+func worthRetrying(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return false
+	}
+	return !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, os.ErrDeadlineExceeded)
 }
 
 func firstLine(body []byte) string {

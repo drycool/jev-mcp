@@ -110,7 +110,7 @@ func toolDefinitions() []Tool {
 						"description": "What was wrong or missing. Short and specific: it becomes part of the dataset.",
 					},
 					"query": map[string]interface{}{
-						"type": "string",
+						"type":        "string",
 						"description": "The question this answer replied to. The router logs only a hash of the query, so a verdict without its question cannot be re-judged by anyone else later. Include it when you have it.",
 					},
 					"source": map[string]interface{}{

@@ -6,9 +6,35 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// shortRetry makes the retry pause negligible for a test and restores it after,
+// so no case spends the production delay.
+func shortRetry(t *testing.T) {
+	t.Helper()
+	restore := retryPause
+	retryPause = 5 * time.Millisecond
+	t.Cleanup(func() { retryPause = restore })
+}
+
+// deadRouter accepts the connection and closes it without an answer, which is
+// what a router that is being restarted looks like from the outside: measured on
+// a live session, the request arrived while the service was coming up, the
+// consumer's deadline expired and the agent concluded the base was gone.
+func deadRouter(w http.ResponseWriter) {
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		panic("test server does not support hijacking")
+	}
+	conn, _, err := hijacker.Hijack()
+	if err != nil {
+		panic(err)
+	}
+	_ = conn.Close()
+}
 
 // stubQueryResponse is a real /query body captured from the router on this
 // installation (graph tier parked, exact FTS5 hit), so the parser is exercised
@@ -201,6 +227,78 @@ func TestQueryRespectsDeadline(t *testing.T) {
 	}
 	if elapsed > 400*time.Millisecond {
 		t.Errorf("took %v, want it to abandon the call near the 100ms budget", elapsed)
+	}
+}
+
+// The retry exists for the one failure that used to cost a whole turn: in a live
+// session the router was restarting, the consumer read "unreachable", concluded
+// the base had nothing to say and spent the next forty seconds grepping the
+// filesystem by hand.
+func TestARouterThatWasNotThereIsAskedAgainOnce(t *testing.T) {
+	shortRetry(t)
+	var attempts int32
+	client, _ := stubJev(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&attempts, 1) == 1 {
+			deadRouter(w)
+			return
+		}
+		_, _ = w.Write([]byte(stubQueryResponse))
+	})
+
+	result, err := client.Query(context.Background(), "q", false)
+	if err != nil {
+		t.Fatalf("Query gave up although the second attempt could answer: %v", err)
+	}
+	if result.DecisionID == "" {
+		t.Error("the answer came back empty after a successful retry")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 2 {
+		t.Errorf("attempts = %d, want 2 (one retry, not a loop)", got)
+	}
+}
+
+// A deadline is not the router being absent: it is the router working on
+// something slow, so repeating the request would spend the caller's remaining
+// time for nothing.
+func TestARequestThatRanOutOfTimeIsNotRepeated(t *testing.T) {
+	shortRetry(t)
+	var attempts int32
+	client, _ := stubJev(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		time.Sleep(400 * time.Millisecond)
+	})
+	client.http.Timeout = 100 * time.Millisecond
+
+	_, err := client.Query(context.Background(), "q", false)
+	if err == nil {
+		t.Fatal("Query returned nil error after the deadline passed")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("attempts = %d, want 1: a slow answer is not retried inside the same budget", got)
+	}
+	if !strings.Contains(err.Error(), "ask again") {
+		t.Errorf("error = %q, want it to tell the agent to come back rather than to avoid the base", err)
+	}
+}
+
+// The message is what the agent reads when the base fails, so it has to say what
+// to do next.  A message that only names the failure is how "the base is down"
+// turns into "the base is useless".
+func TestTheAbsentBaseMessageNamesTheNextStep(t *testing.T) {
+	shortRetry(t)
+	client, _ := stubJev(t, func(w http.ResponseWriter, r *http.Request) {
+		deadRouter(w)
+	})
+
+	_, err := client.Query(context.Background(), "q", false)
+	if err == nil {
+		t.Fatal("Query returned nil error for a router that never answered")
+	}
+	message := err.Error()
+	for _, want := range []string{"twice", "ask it again", "not treat this as the material being missing"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("error = %q, want it to contain %q", message, want)
+		}
 	}
 }
 

@@ -65,8 +65,8 @@ func errorResponse(req Request, code int, message string) Response {
 
 // Tool is one entry of the tools/list result.
 type Tool struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
 	InputSchema map[string]interface{} `json:"inputSchema"`
 }
 
